@@ -1,0 +1,12 @@
+﻿# Python virtual env
+venv/
+# runtime data
+data/
+*.db
+*.sqlite
+*.log
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+.env
