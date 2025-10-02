@@ -8,12 +8,13 @@ import os
 import requests
 from dotenv import load_dotenv
 from dateutil import parser as _dt_parser
-import streamlit.components.v1 as components
-import json, random
+import random
+from statistics import mean
 
-# -----------------------------
-# Load .env (for local dev)
-# -----------------------------
+# import the globe renderer
+from globe_widget import render_globe
+
+# Load local .env for dev
 load_dotenv()
 
 # -----------------------------
@@ -29,10 +30,6 @@ RUN_API_KEY = os.getenv("RUN_API_KEY", "")
 
 st.set_page_config(page_title="Real-Time Cloud Network Dashboard", layout="wide")
 st.title("🌐 Real-Time Cloud Network Performance Dashboard")
-
-# -----------------------------
-# Sidebar
-# -----------------------------
 st.sidebar.header("Data & Filters")
 
 db_path = st.sidebar.text_input("SQLite DB path", DEFAULT_DB)
@@ -46,75 +43,10 @@ st.sidebar.metric("Latency alert (ms)", LATENCY_ALERT_MS)
 st.sidebar.metric("Packet loss alert (%)", PACKET_LOSS_ALERT_PCT)
 
 # -----------------------------
-# Globe background injection
-# -----------------------------
-DEFAULT_STYLE = """
-<style>
-  #globeViz {
-    position: fixed;
-    top: 0; left: 0;
-    width: 100vw; height: 100vh;
-    z-index: -1;
-    opacity: 0.45;
-    pointer-events: none;
-    background: radial-gradient(ellipse at center, rgba(0,0,0,0.0) 0%, rgba(0,0,0,0.18) 100%);
-  }
-  .stApp > .main { position: relative; z-index: 1; }
-  .css-1d391kg, .css-1l9bzkb { z-index: 2; position: relative; }
-</style>
-"""
-
-SCRIPT_TEMPLATE = """
-<script src="https://unpkg.com/three@0.159.0/build/three.min.js"></script>
-<script src="https://unpkg.com/globe.gl"></script>
-<script>
-(function() {
-  const nodes = [];
-  const arcs = [];
-
-  setTimeout(() => {
-    const container = document.getElementById('globeViz');
-    if (!container) return;
-
-    const G = Globe()(container)
-      .globeImageUrl('//unpkg.com/three-globe/example/img/earth-night.jpg')
-      .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
-      .showGraticules(false)
-      .pointsData(nodes)
-      .pointAltitude(d => d.size || 0.4)
-      .pointColor(d => d.color || 'white')
-      .pointRadius(0.6)
-      .arcsData(arcs)
-      .arcColor(d => d.color || 'rgba(0,200,255,0.6)')
-      .arcAltitude(d => d.altitude || 0.06)
-      .arcStroke(0.8)
-      .arcDashLength(0.4)
-      .arcDashGap(0.2)
-      .arcDashAnimateTime(1500);
-
-    G.controls().autoRotate = true;
-    G.controls().autoRotateSpeed = 0.9;
-
-    setInterval(() => {
-      G.arcsData(arcs.map(a => ({ ...a, arcDashInitialGap: Math.random() })));
-    }, 2500);
-  }, 400);
-})();
-</script>
-"""
-
-full_html = f"""
-{DEFAULT_STYLE}
-<div id="globeViz"></div>
-{SCRIPT_TEMPLATE}
-"""
-components.html(full_html, height=600, scrolling=False)
-
-# -----------------------------
 # Data loader
 # -----------------------------
 @st.cache_data(ttl=10)
-def load_data(limit=2000, use_csv_local=False, csv_path_local=None, db_path_local=None):
+def load_data(limit=5000, use_csv_local=False, csv_path_local=None, db_path_local=None):
     try:
         url = f"{PROBE_API_BASE}/data?limit={limit}"
         headers = {}
@@ -127,13 +59,17 @@ def load_data(limit=2000, use_csv_local=False, csv_path_local=None, db_path_loca
             return pd.DataFrame()
         df = pd.json_normalize(payload)
 
-        if "ts" in df.columns: df = df.rename(columns={"ts": "timestamp"})
-        if "latency_ms" in df.columns: df = df.rename(columns={"latency_ms": "avg_ms"})
-        if "loss_pct" in df.columns: df = df.rename(columns={"loss_pct": "packet_loss_pct"})
+        # Normalize names
+        if "ts" in df.columns: df.rename(columns={"ts": "timestamp"}, inplace=True)
+        if "latency_ms" in df.columns: df.rename(columns={"latency_ms": "avg_ms"}, inplace=True)
+        if "loss_pct" in df.columns: df.rename(columns={"loss_pct": "packet_loss_pct"}, inplace=True)
 
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+
         return df
     except Exception:
+        # fallback to local
         try:
             if use_csv_local and csv_path_local and os.path.exists(csv_path_local):
                 return pd.read_csv(csv_path_local, parse_dates=["timestamp"])
@@ -143,143 +79,206 @@ def load_data(limit=2000, use_csv_local=False, csv_path_local=None, db_path_loca
                 conn.close()
                 return df
         except Exception:
-            return pd.DataFrame()
+            pass
     return pd.DataFrame()
 
-# -----------------------------
-# Load & filter data
-# -----------------------------
+# load
 df = load_data(use_csv_local=use_csv, csv_path_local=csv_path, db_path_local=db_path)
 
+# If still empty, show message but continue (globe can still render)
 if df.empty:
-    st.warning("⚠️ No data available. API unreachable and no local data found.")
+    st.warning("No data from cloud API and no local DB/CSV found. Add CSV or DB or fix PROBE_API_BASE.")
     st.stop()
 
+# ensure timestamp exists and filter timeframe
+if "timestamp" not in df.columns:
+    st.error("Loaded data missing 'timestamp' column.")
+    st.stop()
+
+df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
 now = datetime.now(timezone.utc)
 start_time = now - timedelta(hours=hours)
-df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
 df = df[df["timestamp"] >= start_time]
 
+# Build host_stats
+host_stats = {}
+if not df.empty:
+    grouped = df.groupby("host")
+    for host, g in grouped:
+        lat_list = g.get("avg_ms", pd.Series([], dtype=float)).dropna().astype(float).tolist()
+        loss_series = g.get("packet_loss_pct")
+        loss_list = []
+        if loss_series is not None:
+            try:
+                loss_list = loss_series.dropna().astype(float).tolist()
+            except Exception:
+                loss_list = []
+        host_stats[host] = {
+            "avg_latency": mean(lat_list) if lat_list else None,
+            "latest_loss": (loss_list[-1] if loss_list else None),
+            "count": len(g),
+            "last_ts": (g["timestamp"].max() if "timestamp" in g else None)
+        }
+
+# Manual geolocation mapping (add known hosts here)
+HOST_COORDS = {
+    "1.1.1.1": {"lat": 33.4940, "lng": -117.1400},
+    "8.8.8.8": {"lat": 37.751, "lng": -97.822},
+    "www.google.com": {"lat": 37.422, "lng": -122.084},
+    "www.bing.com": {"lat": 47.6097, "lng": -122.3331},
+    "www.yahoo.com": {"lat": 37.7749, "lng": -122.4194},
+}
+
+# GeoIP helper (best-effort; used only for IP-like hosts)
+_geoip_cache = {}
+def try_geoip_lookup(host):
+    if host in _geoip_cache:
+        return _geoip_cache[host]
+    import re, time
+    if re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
+        try:
+            r = requests.get(f"https://ipapi.co/{host}/json/", timeout=3)
+            j = r.json()
+            lat = j.get("latitude") or j.get("lat")
+            lng = j.get("longitude") or j.get("lon")
+            if lat and lng:
+                coords = {"lat": float(lat), "lng": float(lng)}
+                _geoip_cache[host] = coords
+                time.sleep(0.05)
+                return coords
+        except Exception:
+            pass
+    _geoip_cache[host] = None
+    return None
+
+# Build globe nodes + arcs (runner at default SF unless env set)
+RUNNER_LAT = float(os.getenv("RUNNER_LAT", "37.7749"))
+RUNNER_LNG = float(os.getenv("RUNNER_LNG", "-122.4194"))
+
+nodes = []
+arcs = []
+# add runner node (center/origin)
+nodes.append({"lat": RUNNER_LAT, "lng": RUNNER_LNG, "size": 1.6, "color": "cyan", "label": "probe-runner"})
+
+for host, stats in host_stats.items():
+    coords = HOST_COORDS.get(host)
+    if coords is None:
+        coords = try_geoip_lookup(host)
+    if coords is None:
+        coords = {"lat": (random.random() - 0.5) * 180, "lng": (random.random() - 0.5) * 360}
+    size = 0.5 + min(2.0, 0.02 * (stats.get("count", 1)))
+    color = "orange" if stats.get("avg_latency") and stats["avg_latency"] > 300 else ("lime" if stats.get("avg_latency") and stats["avg_latency"] < 50 else "white")
+    nodes.append({
+        "lat": float(coords["lat"]),
+        "lng": float(coords["lng"]),
+        "size": size,
+        "color": color,
+        "label": host,
+        "avg_latency": stats.get("avg_latency"),
+        "count": stats.get("count")
+    })
+    arcs.append({
+        "startLat": RUNNER_LAT, "startLng": RUNNER_LNG,
+        "endLat": float(coords["lat"]), "endLng": float(coords["lng"]),
+        "color": "rgba(0,200,255,0.6)",
+        "altitude": 0.04 + (stats.get("avg_latency") or 0)/5000.0
+    })
+
+# Render the globe (imported helper)
+# show_graticules True will draw latitude/longitude grid lines on the globe
+render_globe(nodes=nodes, arcs=arcs, opacity=0.55, auto_rotate_speed=0.9, show_graticules=True, height=700)
+
+# Now UI: hosts multiselect, metrics, charts, alerts (same as before)
 all_hosts = sorted(df["host"].unique())
-hosts_selected = st.sidebar.multiselect("Hosts to show", options=all_hosts, default=all_hosts)
+hosts_selected = st.sidebar.multiselect("Hosts to show (select which hosts to display)", options=all_hosts, default=all_hosts)
 if not hosts_selected:
     st.warning("Select at least one host to display.")
     st.stop()
-filtered = df[df["host"].isin(hosts_selected)]
 
-# -----------------------------
-# Metrics
-# -----------------------------
+filtered = df[df["host"].isin(hosts_selected)].copy()
+if filtered.empty:
+    st.warning("No filtered data for the selected timeframe/hosts.")
+    st.stop()
+
+# Uptime & latest metrics
 st.markdown("## Uptime & Latest metrics")
 cols = st.columns(len(hosts_selected))
 for i, host in enumerate(hosts_selected):
     sub = filtered[filtered["host"] == host]
     total = len(sub)
     if total == 0:
-        uptime_pct, latency_display, loss_display, proto = 0, "n/a", "n/a", "n/a"
+        uptime_pct = 0.0
+        latency_display = "n/a"
+        loss_display = "n/a"
+        method_or_proto = "n/a"
     else:
         if "packet_loss_pct" in sub.columns:
             up = len(sub[sub["packet_loss_pct"] < 100])
         else:
             up = len(sub[pd.notnull(sub.get("avg_ms"))])
-        uptime_pct = (up / total * 100.0) if total else 0.0
-
+        uptime_pct = (up / total * 100.0) if total > 0 else 0.0
         last = sub.sort_values("timestamp").iloc[-1]
         latency_display = f"{last['avg_ms']:.1f} ms" if pd.notnull(last.get("avg_ms")) else "n/a"
-        loss_display = f"{last['packet_loss_pct']:.1f}%" if pd.notnull(last.get("packet_loss_pct")) else "n/a"
-        proto = last.get("protocol") or last.get("method") or "n/a"
+        method_or_proto = last.get("protocol") or last.get("method") or "n/a"
+        loss_val = last.get("packet_loss_pct") if "packet_loss_pct" in last else (last.get("loss_pct") if "loss_pct" in last else None)
+        loss_display = f"{loss_val:.1f}%" if loss_val is not None and pd.notnull(loss_val) else "n/a"
 
     with cols[i]:
-        st.metric(f"{host} uptime % (last {hours}h)", f"{uptime_pct:.1f}%")
-        st.caption(f"Last: {proto} | Latency: {latency_display} | Loss: {loss_display}")
+        st.metric(label=f"{host} uptime % (last {hours}h)", value=f"{uptime_pct:.1f}%")
+        st.write(f"Last: {method_or_proto} | Latency: {latency_display} | Loss: {loss_display}")
 
-# -----------------------------
-# Charts
-# -----------------------------
+# Charts (defensive: dropna on field that exists)
 st.markdown("---")
 st.markdown("## Time series")
 
-if not filtered.empty:
-    if "avg_ms" in filtered.columns:
+if "avg_ms" in filtered.columns:
+    tmp = filtered.dropna(subset=["avg_ms"])
+    if not tmp.empty:
         lat_chart = (
-            alt.Chart(filtered.dropna(subset=["avg_ms"]))
+            alt.Chart(tmp)
             .mark_line()
-            .encode(
-                x="timestamp:T",
-                y="avg_ms:Q",
-                color="host:N",
-                tooltip=["timestamp:T", "host:N", "avg_ms:Q", "packet_loss_pct:Q"],
-            )
+            .encode(x=alt.X("timestamp:T", title="Time (UTC)"),
+                    y=alt.Y("avg_ms:Q", title="Avg latency (ms)"),
+                    color="host:N",
+                    tooltip=["timestamp:T", "host:N", "avg_ms:Q", "packet_loss_pct:Q"])
             .interactive()
             .properties(height=300)
         )
         st.altair_chart(lat_chart, use_container_width=True)
 
-    if "packet_loss_pct" in filtered.columns:
+if "packet_loss_pct" in filtered.columns:
+    tmp2 = filtered.dropna(subset=["packet_loss_pct"])
+    if not tmp2.empty:
         loss_chart = (
-            alt.Chart(filtered.dropna(subset=["packet_loss_pct"]))
+            alt.Chart(tmp2)
             .mark_line()
-            .encode(
-                x="timestamp:T",
-                y="packet_loss_pct:Q",
-                color="host:N",
-                tooltip=["timestamp:T", "host:N", "packet_loss_pct:Q", "avg_ms:Q"],
-            )
+            .encode(x=alt.X("timestamp:T", title="Time (UTC)"),
+                    y=alt.Y("packet_loss_pct:Q", title="Packet loss (%)"),
+                    color="host:N",
+                    tooltip=["timestamp:T", "host:N", "packet_loss_pct:Q", "avg_ms:Q"])
             .interactive()
             .properties(height=300)
         )
         st.altair_chart(loss_chart, use_container_width=True)
 
-# -----------------------------
 # Alerts
-# -----------------------------
 st.markdown("---")
 st.markdown("## Alerts (detected)")
-
 alerts = []
 for _, row in filtered.iterrows():
     if pd.notnull(row.get("avg_ms")) and row["avg_ms"] > LATENCY_ALERT_MS:
-        alerts.append({"timestamp": row["timestamp"], "host": row["host"], "msg": f"High latency > {LATENCY_ALERT_MS} ms"})
+        alerts.append({"timestamp": row["timestamp"], "host": row["host"], "msg": f"High latency > {LATENCY_ALERT_MS} ms", "value": row["avg_ms"]})
     if pd.notnull(row.get("packet_loss_pct")) and row["packet_loss_pct"] >= PACKET_LOSS_ALERT_PCT:
-        alerts.append({"timestamp": row["timestamp"], "host": row["host"], "msg": f"High packet loss >= {PACKET_LOSS_ALERT_PCT}%"})
+        alerts.append({"timestamp": row["timestamp"], "host": row["host"], "msg": f"High packet loss >= {PACKET_LOSS_ALERT_PCT}%", "value": row["packet_loss_pct"]})
 
 if alerts:
     st.dataframe(pd.DataFrame(alerts).sort_values("timestamp", ascending=False))
 else:
     st.info("No alerts in selected timeframe.")
 
-# -----------------------------
-# On-demand Probe
-# -----------------------------
+# Refresh button
 st.markdown("---")
-st.subheader("🕹️ Probe a Site Now")
-
-url = st.text_input("Enter a website or IP (e.g., www.google.com, 8.8.8.8):")
-if st.button("Probe (HTTP direct)"):
-    if url:
-        try:
-            start = datetime.utcnow().timestamp()
-            r = requests.get("http://" + url, timeout=5)
-            latency = (datetime.utcnow().timestamp() - start) * 1000
-            if latency < 200:
-                st.success(f"🟢 {url} responded in {latency:.2f} ms (HTTP {r.status_code})")
-            elif latency < 500:
-                st.warning(f"🟡 {url} responded in {latency:.2f} ms (HTTP {r.status_code})")
-            else:
-                st.error(f"🔴 {url} responded in {latency:.2f} ms (HTTP {r.status_code})")
-        except Exception as e:
-            st.error(f"❌ Failed to probe {url}: {e}")
-
-host_input = st.text_input("Enter host for cloud probe (default 1.1.1.1):", "1.1.1.1")
-if st.button("Run Probe Now (cloud API)"):
-    try:
-        headers = {"Content-Type": "application/json"}
-        if RUN_API_KEY:
-            headers["X-API-KEY"] = RUN_API_KEY
-        r = requests.post(f"{PROBE_API_BASE}/run?host={host_input}", headers=headers, timeout=6)
-        r.raise_for_status()
-        st.success(f"Triggered cloud probe for {host_input}: {r.json()}")
-        st.cache_data.clear()
-        st.rerun()
-    except Exception as e:
-        st.error(f"Failed to trigger cloud probe: {e}")
+st.write("Data source:", "☁️ Cloud API" if PROBE_API_BASE else ("CSV" if use_csv else "SQLite DB - " + db_path))
+if st.button("Refresh data"):
+    st.cache_data.clear()
+    st.rerun()
