@@ -186,7 +186,7 @@ for host, stats in host_stats.items():
     })
 
 # Render the globe (imported helper)
-render_globe(nodes=nodes, arcs=arcs, opacity=0.55, auto_rotate_speed=12, show_graticules=True, height=700)
+render_globe(nodes=nodes, arcs=arcs, opacity=0.95, auto_rotate_speed=12, show_graticules=True, height=700)
 # show_graticules True will draw latitude/longitude grid lines on the globe
 
 
