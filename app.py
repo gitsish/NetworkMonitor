@@ -26,7 +26,7 @@ LATENCY_ALERT_MS = 200
 PACKET_LOSS_ALERT_PCT = 20.0
 
 PROBE_API_BASE = os.getenv("PROBE_API_BASE", "https://web-production-d9ba8.up.railway.app")
-RUN_API_KEY = os.getenv("RUN_API_KEY", "")
+RUN_API_KEY = os.getenv("RUN_API_KEY", "JSGsRfSFXYXjoDiTLqJC-EKMZjRi45AH5C5ZVSOQaGg")
 
 
 st.set_page_config(page_title="Real-Time Cloud Network Dashboard", layout="wide")
