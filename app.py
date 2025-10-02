@@ -335,4 +335,4 @@ st.write("Data source:", "☁️ Cloud API" if PROBE_API_BASE else ("CSV" if use
 if st.button("Refresh data"):
     st.cache_data.clear()
     st.rerun()
-render_globe(nodes=nodes, arcs=arcs, opacity=0.55, auto_rotate_speed=12, show_graticules=True, height=700)
+render_globe(nodes=nodes, arcs=arcs, opacity=0.95, auto_rotate_speed=12, show_graticules=True, height=700)
