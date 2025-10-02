@@ -4,15 +4,25 @@ Real-Time Network Probe
 - Run once: python probe.py --once
 - Run continuously: python probe.py --interval 1   (interval in minutes)
 """
-import os
-
-DISABLE_PING = os.getenv("DISABLE_PING", "true").lower() == "true"
-
 
 import subprocess, sys, platform, re, time, argparse, os, json, sqlite3, csv, logging
 from datetime import datetime
 from time import perf_counter
 import requests
+import threading
+
+# Try to import push_row helper (optional). If not present, probe still works locally.
+try:
+    from push_row import push_row
+except Exception:
+    push_row = None
+
+# Load local .env when present (optional convenience)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 # === CONFIG (edit hosts here) ===
 ENDPOINTS = [
@@ -179,6 +189,20 @@ def insert_alert(alert, db_path=DB_PATH):
     conn.commit()
     conn.close()
 
+# === helper: push to cloud asynchronously ===
+def push_to_cloud_async(payload):
+    if not push_row:
+        # no push helper available
+        return
+    def _worker(p):
+        try:
+            push_row(p)
+            logging.info("Pushed row to cloud /ingest")
+        except Exception as e:
+            logging.debug(f"Cloud push failed (ignored): {e}")
+    t = threading.Thread(target=_worker, args=(payload,), daemon=True)
+    t.start()
+
 # === per-host probe run ===
 def probe_one(endpoint):
     name = endpoint.get("name")
@@ -276,6 +300,27 @@ def run_once():
         insert_db(row)
         check_and_record_alerts(row)
         logging.info(f"Recorded: host={row['host']} method={row['method']} avg_ms={row['avg_ms']} loss={row['packet_loss_pct']}")
+
+        # Asynchronously push row to cloud (safe - doesn't crash the monitor)
+        try:
+            payload = {
+                "timestamp": row["timestamp"],
+                "name": row["name"],
+                "host": row["host"],
+                "method": row["method"],
+                "avg_ms": row["avg_ms"],
+                "min_ms": row["min_ms"],
+                "max_ms": row["max_ms"],
+                "rtts": row["rtts"],
+                "sent": row["sent"],
+                "received": row["received"],
+                "packet_loss_pct": row["packet_loss_pct"],
+                "http_status": row.get("http_status"),
+                "error": row.get("error")
+            }
+            push_to_cloud_async(payload)
+        except Exception as e:
+            logging.debug("Failed to queue cloud push (ignored): %s", e)
 
 # === CLI ===
 def main():
