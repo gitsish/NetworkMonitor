@@ -27,7 +27,7 @@ PACKET_LOSS_ALERT_PCT = 20.0
 
 PROBE_API_BASE = os.getenv("PROBE_API_BASE", "https://web-production-d9ba8.up.railway.app")
 RUN_API_KEY = os.getenv("RUN_API_KEY", "")
-render_globe(nodes=nodes, arcs=arcs, opacity=0.55, auto_rotate_speed=12, show_graticules=True, height=700)
+
 
 st.set_page_config(page_title="Real-Time Cloud Network Dashboard", layout="wide")
 st.title("🌐 Real-Time Cloud Network Performance Dashboard")
@@ -186,6 +186,7 @@ for host, stats in host_stats.items():
     })
 
 # Render the globe (imported helper)
+render_globe(nodes=nodes, arcs=arcs, opacity=0.55, auto_rotate_speed=12, show_graticules=True, height=700)
 # show_graticules True will draw latitude/longitude grid lines on the globe
 
 
