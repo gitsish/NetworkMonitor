@@ -186,7 +186,7 @@ for host, stats in host_stats.items():
 
 # Render the globe (imported helper)
 # show_graticules True will draw latitude/longitude grid lines on the globe
-render_globe(nodes=nodes, arcs=arcs, opacity=0.55, auto_rotate_speed=12, show_graticules=True, height=700)
+
 
 # Now UI: hosts multiselect, metrics, charts, alerts (same as before)
 all_hosts = sorted(df["host"].unique())
@@ -276,9 +276,46 @@ if alerts:
 else:
     st.info("No alerts in selected timeframe.")
 
+# -----------------------------
+# On-demand Probe
+# -----------------------------
+st.markdown("---")
+st.subheader("🕹️ Probe a Site Now")
+
+url = st.text_input("Enter a website or IP (e.g., www.google.com, 8.8.8.8):")
+if st.button("Probe (HTTP direct)"):
+    if url:
+        try:
+            start = datetime.utcnow().timestamp()
+            r = requests.get("http://" + url, timeout=5)
+            latency = (datetime.utcnow().timestamp() - start) * 1000
+            if latency < 200:
+                st.success(f"🟢 {url} responded in {latency:.2f} ms (HTTP {r.status_code})")
+            elif latency < 500:
+                st.warning(f"🟡 {url} responded in {latency:.2f} ms (HTTP {r.status_code})")
+            else:
+                st.error(f"🔴 {url} responded in {latency:.2f} ms (HTTP {r.status_code})")
+        except Exception as e:
+            st.error(f"❌ Failed to probe {url}: {e}")
+
+host_input = st.text_input("Enter host for cloud probe (default 1.1.1.1):", "1.1.1.1")
+if st.button("Run Probe Now (cloud API)"):
+    try:
+        headers = {"Content-Type": "application/json"}
+        if RUN_API_KEY:
+            headers["X-API-KEY"] = RUN_API_KEY
+        r = requests.post(f"{PROBE_API_BASE}/run?host={host_input}", headers=headers, timeout=6)
+        r.raise_for_status()
+        st.success(f"Triggered cloud probe for {host_input}: {r.json()}")
+        st.cache_data.clear()
+        st.rerun()
+    except Exception as e:
+        st.error(f"Failed to trigger cloud probe: {e}")
+
 # Refresh button
 st.markdown("---")
 st.write("Data source:", "☁️ Cloud API" if PROBE_API_BASE else ("CSV" if use_csv else "SQLite DB - " + db_path))
 if st.button("Refresh data"):
     st.cache_data.clear()
     st.rerun()
+render_globe(nodes=nodes, arcs=arcs, opacity=0.55, auto_rotate_speed=12, show_graticules=True, height=700)
