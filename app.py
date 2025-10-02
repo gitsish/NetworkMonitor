@@ -186,7 +186,7 @@ for host, stats in host_stats.items():
 
 # Render the globe (imported helper)
 # show_graticules True will draw latitude/longitude grid lines on the globe
-render_globe(nodes=nodes, arcs=arcs, opacity=0.55, auto_rotate_speed=0.9, show_graticules=True, height=700)
+render_globe(nodes=nodes, arcs=arcs, opacity=0.55, auto_rotate_speed=12, show_graticules=True, height=700)
 
 # Now UI: hosts multiselect, metrics, charts, alerts (same as before)
 all_hosts = sorted(df["host"].unique())
