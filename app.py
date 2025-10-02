@@ -302,17 +302,32 @@ if st.button("Probe (HTTP direct)"):
 
 host_input = st.text_input("Enter host for cloud probe (default 1.1.1.1):", "1.1.1.1")
 if st.button("Run Probe Now (cloud API)"):
-    try:
-        headers = {"Content-Type": "application/json"}
-        if RUN_API_KEY:
-            headers["X-API-KEY"] = RUN_API_KEY
-        r = requests.post(f"{PROBE_API_BASE}/run?host={host_input}", headers=headers, timeout=6)
-        r.raise_for_status()
-        st.success(f"Triggered cloud probe for {host_input}: {r.json()}")
-        st.cache_data.clear()
-        st.rerun()
-    except Exception as e:
-        st.error(f"Failed to trigger cloud probe: {e}")
+    if not host_input:
+        st.error("Enter a host to probe.")
+    else:
+        api_key_local = RUN_API_KEY or (st.secrets.get("RUN_API_KEY") if "RUN_API_KEY" in st.secrets else "")
+        if not api_key_local:
+            st.warning("No RUN_API_KEY configured -- set it in Streamlit secrets or env.")
+        base = PROBE_API_BASE.rstrip('/')
+        # try X-API-KEY header first
+        headers = {"Content-Type": "application/json", "X-API-KEY": api_key_local} if api_key_local else {"Content-Type": "application/json"}
+        r = requests.post(f"{base}/run?host={host_input}", headers=headers, timeout=8)
+        # if unauthorized, try Bearer
+        if r.status_code == 401 and api_key_local:
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key_local}"}
+            r = requests.post(f"{base}/run?host={host_input}", headers=headers, timeout=8)
+        try:
+            r.raise_for_status()
+            st.success(f"Triggered cloud probe for {host_input}: {r.json()}")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as exc:
+            # show status & server message for debugging
+            try:
+                st.error(f"Failed to trigger cloud probe: HTTP {r.status_code} — {r.text}")
+            except:
+                st.error(f"Failed to trigger cloud probe: {exc}")
+
 
 # Refresh button
 st.markdown("---")
